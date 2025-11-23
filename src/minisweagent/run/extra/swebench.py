@@ -20,6 +20,7 @@ from rich.live import Live
 
 from minisweagent import Environment
 from minisweagent.agents.default import DefaultAgent
+from minisweagent.agents.consensus import ConsensusAgent
 from minisweagent.config import builtin_config_dir, get_config_path
 from minisweagent.environments import get_environment
 from minisweagent.models import get_model
@@ -50,20 +51,22 @@ DATASET_MAPPING = {
 _OUTPUT_FILE_LOCK = threading.Lock()
 
 
-class ProgressTrackingAgent(DefaultAgent):
-    """Simple wrapper around DefaultAgent that provides progress updates."""
+def get_progress_tracking_agent(agent_cls: type[DefaultAgent]) -> type[DefaultAgent]:
+    """Return an agent subclass that provides progress updates."""
 
-    def __init__(self, *args, progress_manager: RunBatchProgressManager, instance_id: str = "", **kwargs):
-        super().__init__(*args, **kwargs)
-        self.progress_manager: RunBatchProgressManager = progress_manager
-        self.instance_id = instance_id
+    class ProgressTrackingAgent(agent_cls):
+        def __init__(self, *args, progress_manager: RunBatchProgressManager, instance_id: str = "", **kwargs):
+            super().__init__(*args, **kwargs)
+            self.progress_manager: RunBatchProgressManager = progress_manager
+            self.instance_id = instance_id
 
-    def step(self) -> dict:
-        """Override step to provide progress updates."""
-        self.progress_manager.update_instance_status(
-            self.instance_id, f"Step {self.model.n_calls + 1:3d} (${self.model.cost:.2f})"
-        )
-        return super().step()
+        def step(self) -> dict:  # type: ignore[override]
+            self.progress_manager.update_instance_status(
+                self.instance_id, f"Step {self.model.n_calls + 1:3d} (${self.model.cost:.2f})"
+            )
+            return super().step()
+
+    return ProgressTrackingAgent
 
 
 def get_swebench_docker_image_name(instance: dict) -> str:
@@ -124,6 +127,7 @@ def process_instance(
     output_dir: Path,
     config: dict,
     progress_manager: RunBatchProgressManager,
+    agent_cls: type[DefaultAgent],
 ) -> None:
     """Process a single SWEBench instance."""
     instance_id = instance["instance_id"]
@@ -142,7 +146,8 @@ def process_instance(
 
     try:
         env = get_sb_environment(config, instance)
-        agent = ProgressTrackingAgent(
+        AgentWithProgress = get_progress_tracking_agent(agent_cls)
+        agent = AgentWithProgress(
             model,
             env,
             progress_manager=progress_manager,
@@ -199,6 +204,8 @@ def main(
     output: str = typer.Option("", "-o", "--output", help="Output directory", rich_help_panel="Basic"),
     workers: int = typer.Option(1, "-w", "--workers", help="Number of worker threads for parallel processing", rich_help_panel="Basic"),
     model: str | None = typer.Option(None, "-m", "--model", help="Model to use", rich_help_panel="Basic"),
+    agent_type: str = typer.Option("default", "--agent-type", help="Agent type to use (default or consensus)", rich_help_panel="Basic"),
+    consensus_num_samples: int | None = typer.Option(None, "--consensus-num-samples", help="Number of samples to draw when using the ConsensusAgent", rich_help_panel="Advanced"),
     model_class: str | None = typer.Option(None, "-c", "--model-class", help="Model class to use (e.g., 'anthropic' or 'minisweagent.models.anthropic.AnthropicModel')", rich_help_panel="Advanced"),
     redo_existing: bool = typer.Option(False, "--redo-existing", help="Redo existing instances", rich_help_panel="Data selection"),
     config_spec: Path = typer.Option( builtin_config_dir / "extra" / "swebench.yaml", "-c", "--config", help="Path to a config file", rich_help_panel="Basic"),
@@ -231,6 +238,16 @@ def main(
     if model_class is not None:
         config.setdefault("model", {})["model_class"] = model_class
 
+    agent_types = {"default": DefaultAgent, "consensus": ConsensusAgent}
+    agent_type = agent_type.lower()
+    if agent_type not in agent_types:
+        raise ValueError(f"Unknown agent type '{agent_type}'. Valid options are: {', '.join(agent_types)}")
+    if consensus_num_samples is not None and agent_type != "consensus":
+        raise ValueError("--consensus-num-samples can only be used with --agent-type=consensus")
+    if agent_type == "consensus" and consensus_num_samples is not None:
+        config.setdefault("agent", {})["num_samples"] = consensus_num_samples
+    agent_cls = agent_types[agent_type]
+
     progress_manager = RunBatchProgressManager(len(instances), output_path / f"exit_statuses_{time.time()}.yaml")
 
     def process_futures(futures: dict[concurrent.futures.Future, str]):
@@ -247,7 +264,7 @@ def main(
     with Live(progress_manager.render_group, refresh_per_second=4):
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
             futures = {
-                executor.submit(process_instance, instance, output_path, config, progress_manager): instance[
+                executor.submit(process_instance, instance, output_path, config, progress_manager, agent_cls): instance[
                     "instance_id"
                 ]
                 for instance in instances
