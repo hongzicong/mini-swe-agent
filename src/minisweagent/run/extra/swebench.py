@@ -206,6 +206,7 @@ def main(
     model: str | None = typer.Option(None, "-m", "--model", help="Model to use", rich_help_panel="Basic"),
     agent_type: str = typer.Option("default", "--agent-type", help="Agent type to use (default or consensus)", rich_help_panel="Basic"),
     consensus_num_samples: int | None = typer.Option(None, "--consensus-num-samples", help="Number of samples to draw when using the ConsensusAgent", rich_help_panel="Advanced"),
+    consensus_use_embeddings: bool = typer.Option(False, "--consensus-use-embeddings", help="Action embedding", rich_help_panel="Action embedding"),
     model_class: str | None = typer.Option(None, "-c", "--model-class", help="Model class to use (e.g., 'anthropic' or 'minisweagent.models.anthropic.AnthropicModel')", rich_help_panel="Advanced"),
     redo_existing: bool = typer.Option(False, "--redo-existing", help="Redo existing instances", rich_help_panel="Data selection"),
     config_spec: Path = typer.Option( builtin_config_dir / "extra" / "swebench.yaml", "-c", "--config", help="Path to a config file", rich_help_panel="Basic"),
@@ -246,6 +247,8 @@ def main(
         raise ValueError("--consensus-num-samples can only be used with --agent-type=consensus")
     if agent_type == "consensus" and consensus_num_samples is not None:
         config.setdefault("agent", {})["num_samples"] = consensus_num_samples
+    if agent_type == "consensus" and consensus_use_embeddings is not None:
+        config.setdefault("agent", {})["use_embeddings"] = consensus_use_embeddings
     agent_cls = agent_types[agent_type]
 
     progress_manager = RunBatchProgressManager(len(instances), output_path / f"exit_statuses_{time.time()}.yaml")
