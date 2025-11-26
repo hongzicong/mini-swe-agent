@@ -1,6 +1,7 @@
 from collections import Counter
 from dataclasses import dataclass
 from minisweagent.agents.default import AgentConfig, DefaultAgent, FormatError, LimitsExceeded
+from sklearn.cluster import AgglomerativeClustering
 from typing import List
 
 import numpy as np
@@ -10,7 +11,7 @@ class ConsensusAgentConfig(AgentConfig):
     num_samples: int = 3
     use_embeddings: bool = False
     similarity_threshold: float = 0.7
-    embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
+    embedding_model: str = "microsoft/codebert-base"
 
 class ConsensusAgent(DefaultAgent):
 
@@ -49,50 +50,57 @@ class ConsensusAgent(DefaultAgent):
 
         return self.get_observation(voted_response)
     
+    # def _vote_with_embeddings_cluster(self, candidates: List[tuple[str, dict]]) -> tuple[dict, int]:
+    #     embedder = self._get_embedder()
+    #     actions = [cand[0] for cand in candidates]
+    #     embeddings = embedder.encode(actions, normalize_embeddings=True)
+
+    #     # Agglomerative clustering (cosine distance)
+    #     clustering = AgglomerativeClustering(
+    #         n_clusters=None,
+    #         distance_threshold=1 - self.config.similarity_threshold,
+    #         metric="cosine",
+    #         linkage="complete",
+    #     )
+    #     labels = clustering.fit_predict(embeddings)
+
+    #     # Group samples by cluster id
+    #     cluster_map = {}
+    #     for idx, label in enumerate(labels):
+    #         cluster_map.setdefault(label, []).append(idx)
+
+    #     # Find the biggest cluster
+    #     winning_label = max(cluster_map, key=lambda c: len(cluster_map[c]))
+    #     cluster_indices = cluster_map[winning_label]
+
+    #     # Calculate cluster centroid
+    #     cluster_centroid = np.mean([embeddings[i] for i in cluster_indices], axis=0)
+    #     cluster_centroid /= np.linalg.norm(cluster_centroid) + 1e-8
+
+    #     # Pick the action closest to centroid
+    #     winning_index = max(
+    #         cluster_indices,
+    #         key=lambda i: float(np.dot(embeddings[i], cluster_centroid))
+    #     )
+
+    #     voted_response = candidates[winning_index][1]
+    #     count = len(cluster_indices)
+
+    #     return voted_response, count
+
     def _vote_with_embeddings(self, candidates: List[tuple[str, dict]]) -> tuple[dict, int]:
         embedder = self._get_embedder()
         actions = [cand[0] for cand in candidates]
         embeddings = embedder.encode(actions, normalize_embeddings=True)
 
-        clusters = []
-        for idx, embedding in enumerate(embeddings):
-            embedding_vector = np.array(embedding, dtype=np.float64)
-            best_cluster = None
-            best_similarity = 0.0
+        embeddings = np.asarray(embeddings)
+        sim_matrix = embeddings @ embeddings.T
 
-            for cluster in clusters:
-                # dot product == cosine similarity (because normalized)
-                similarity = float(np.dot(embedding_vector, cluster["centroid"]))
+        scores = sim_matrix.sum(axis=1)
 
-                # --- Step 1: use a lower threshold to allow clustering ---
-                if similarity >= self.config.similarity_threshold and similarity > best_similarity:
-                    best_cluster = cluster
-                    best_similarity = similarity
-
-            # Create new cluster if no appropriate cluster found
-            if best_cluster is None:
-                clusters.append({
-                    "indices": [idx],
-                    "sum": embedding_vector,
-                    "centroid": embedding_vector,
-                })
-            else:
-                # add to existing cluster
-                best_cluster["indices"].append(idx)
-                best_cluster["sum"] += embedding_vector
-                norm = np.linalg.norm(best_cluster["sum"])
-                if norm == 0:
-                    best_cluster["centroid"] = best_cluster["sum"]
-                else:
-                    best_cluster["centroid"] = best_cluster["sum"] / norm
-
-        # --- Find the cluster with most members ---
-        winning_cluster = max(clusters, key=lambda c: len(c["indices"]))
-        cluster_indices = winning_cluster["indices"]
-        winning_index = winning_cluster["indices"][0] 
-        voted_response = candidates[winning_index][1] 
-
-        count = len(cluster_indices)
+        winning_index = int(np.argmax(scores))
+        voted_response = candidates[winning_index][1]
+        count = None
 
         return voted_response, count
 
@@ -106,6 +114,17 @@ class ConsensusAgent(DefaultAgent):
                     " install it or disable embeddings."
                 ) from exc
 
-            self._embedder = SentenceTransformer(self.config.embedding_model)
+            try:
+                self._embedder = SentenceTransformer(
+                    self.config.embedding_model, device="cpu"
+                )
+            except NotImplementedError:
+                # Some torch versions initialize parameters on the meta device when
+                # low_cpu_mem_usage is enabled, which can fail when moving back to CPU.
+                self._embedder = SentenceTransformer(
+                    self.config.embedding_model,
+                    device="cpu",
+                    model_kwargs={"low_cpu_mem_usage": False},
+                )
 
         return self._embedder
