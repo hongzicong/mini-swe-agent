@@ -23,7 +23,7 @@ class ConsensusAgent(DefaultAgent):
         all_responses = []
 
         for _ in range(self.config.num_samples):
-            if 0 < self.config.step_limit <= self.model.n_calls or 0 < self.config.cost_limit <= self.model.cost:
+            if self.config.step_limit * self.config.num_samples <= self.model.n_calls or self.config.cost_limit * self.config.num_samples <= self.model.cost:
                 raise LimitsExceeded()
             response = self.model.query(self.messages)
             all_responses.append(response)
@@ -46,11 +46,17 @@ class ConsensusAgent(DefaultAgent):
 
             voted_response = next(resp for act, resp in valid_candidates if act == winner_action)
 
-        self.add_message("assistant", **voted_response, consensus_count=count)
+        self.add_message(
+            "assistant",
+            **voted_response,
+            consensus_count=count,
+            consensus_candidates=[response["content"] for response in all_responses],
+        )
 
         return self.get_observation(voted_response)
     
-    # def _vote_with_embeddings_cluster(self, candidates: List[tuple[str, dict]]) -> tuple[dict, int]:
+    # # Clustering-based Voting
+    # def _vote_with_embeddings(self, candidates: List[tuple[str, dict]]) -> tuple[dict, int]:
     #     embedder = self._get_embedder()
     #     actions = [cand[0] for cand in candidates]
     #     embeddings = embedder.encode(actions, normalize_embeddings=True)
@@ -88,6 +94,7 @@ class ConsensusAgent(DefaultAgent):
 
     #     return voted_response, count
 
+    # Pairwise Similarity-based Voting
     def _vote_with_embeddings(self, candidates: List[tuple[str, dict]]) -> tuple[dict, int]:
         embedder = self._get_embedder()
         actions = [cand[0] for cand in candidates]
@@ -100,9 +107,8 @@ class ConsensusAgent(DefaultAgent):
 
         winning_index = int(np.argmax(scores))
         voted_response = candidates[winning_index][1]
-        count = None
 
-        return voted_response, count
+        return voted_response, scores.tolist()
 
     def _get_embedder(self):
         if not hasattr(self, "_embedder"):
