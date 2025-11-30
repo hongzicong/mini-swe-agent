@@ -21,7 +21,6 @@ from rich.live import Live
 from minisweagent import Environment
 from minisweagent.agents.default import DefaultAgent
 from minisweagent.agents.consensus import ConsensusAgent
-from minisweagent.agents.final_consensus import FinalConsensusAgent
 from minisweagent.config import builtin_config_dir, get_config_path
 from minisweagent.environments import get_environment
 from minisweagent.models import get_model
@@ -205,9 +204,9 @@ def main(
     output: str = typer.Option("", "-o", "--output", help="Output directory", rich_help_panel="Basic"),
     workers: int = typer.Option(1, "-w", "--workers", help="Number of worker threads for parallel processing", rich_help_panel="Basic"),
     model: str | None = typer.Option(None, "-m", "--model", help="Model to use", rich_help_panel="Basic"),
-    agent_type: str = typer.Option("default", "--agent-type", help="Agent type to use (default, consensus, or final_consensus)", rich_help_panel="Basic"),
+    agent_type: str = typer.Option("default", "--agent-type", help="Agent type to use (default or consensus)", rich_help_panel="Basic"),
     consensus_num_samples: int | None = typer.Option(None, "--consensus-num-samples", help="Number of samples to draw when using the ConsensusAgent", rich_help_panel="Advanced"),
-    consensus_use_embeddings: bool = typer.Option(False, "--consensus-use-embeddings", help="Action embedding", rich_help_panel="Action embedding"),
+    consensus_voting_manner: str = typer.Option("exact", "--consensus-voting-manner", help="Consensus voting manner: exact, random, embedding, or llm_judge", rich_help_panel="Advanced"),
     model_class: str | None = typer.Option(None, "-c", "--model-class", help="Model class to use (e.g., 'anthropic' or 'minisweagent.models.anthropic.AnthropicModel')", rich_help_panel="Advanced"),
     redo_existing: bool = typer.Option(False, "--redo-existing", help="Redo existing instances", rich_help_panel="Data selection"),
     config_spec: Path = typer.Option( builtin_config_dir / "extra" / "swebench.yaml", "-c", "--config", help="Path to a config file", rich_help_panel="Basic"),
@@ -242,18 +241,17 @@ def main(
 
     agent_types = {
         "default": DefaultAgent, 
-        "consensus": ConsensusAgent, 
-        "final_consensus": FinalConsensusAgent,
+        "consensus": ConsensusAgent,
     }
     agent_type = agent_type.lower()
     if agent_type not in agent_types:
         raise ValueError(f"Unknown agent type '{agent_type}'. Valid options are: {', '.join(agent_types)}")
-    if consensus_num_samples is not None and agent_type not in ("consensus", "final_consensus"):
+    if consensus_num_samples is not None and agent_type not in ("consensus"):
         raise ValueError("--consensus-num-samples can only be used with consensus-based agents")
-    if agent_type in {"consensus", "final_consensus"} and consensus_num_samples is not None:
+    if agent_type in {"consensus"} and consensus_num_samples is not None:
         config.setdefault("agent", {})["num_samples"] = consensus_num_samples
-    if agent_type in {"consensus", "final_consensus"} and consensus_use_embeddings is not None:
-        config.setdefault("agent", {})["use_embeddings"] = consensus_use_embeddings
+    if agent_type in {"consensus"} and consensus_voting_manner is not None:
+        config.setdefault("agent", {})["voting_manner"] = consensus_voting_manner
     agent_cls = agent_types[agent_type]
 
     progress_manager = RunBatchProgressManager(len(instances), output_path / f"exit_statuses_{time.time()}.yaml")

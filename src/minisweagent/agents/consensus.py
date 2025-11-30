@@ -1,17 +1,56 @@
 from collections import Counter
 from dataclasses import dataclass
 from minisweagent.agents.default import AgentConfig, DefaultAgent, FormatError, LimitsExceeded
-from sklearn.cluster import AgglomerativeClustering
+# from sklearn.cluster import AgglomerativeClustering
 from typing import List
-
+import re
 import numpy as np
+import random
 
 @dataclass
 class ConsensusAgentConfig(AgentConfig):
     num_samples: int = 3
-    use_embeddings: bool = False
+    voting_manner: str = "exact"
     similarity_threshold: float = 0.7
-    embedding_model: str = "microsoft/codebert-base"
+    # embedding_model: str = "microsoft/codebert-base"
+    # embedding_model: str = "BAAI/bge-small-en-v1.5"
+    embedding_model: str = "BAAI/bge-base-en-v1.5"
+    llm_judge_template: str = (
+'''
+Given the above output, you will be given multiple candidate actions. 
+Each action is shown in a code block and labeled with an ID number.
+
+Your goal: Select the single best action to execute next, based on the conversation and context so far.
+
+**CRITICAL REQUIREMENTS:**
+- Consider all candidate actions carefully.
+- Choose exactly ONE action.
+
+{{actions}}
+'''
+    )
+
+#     llm_judge_template: str = (
+# '''
+# Given the above output, you will be given multiple candidate actions as follows.
+# Each action is shown in a code block and labeled with an ID number.
+
+# {{actions}}
+
+# Your goal: Select the single best action to execute next, based on the conversation and context so far.
+
+# **CRITICAL REQUIREMENTS:**
+# - Consider all candidate actions carefully.
+# - Choose exactly ONE action.
+
+# Correct response format (example):
+# <example_response>
+# THOUGHT: I think Action X is the best because we need to first verify the content around the get_inline_instances method.
+# </example_response>
+
+# Where X is the chosen action ID (starting from 1).
+# '''
+#     )
 
 class ConsensusAgent(DefaultAgent):
 
@@ -22,7 +61,7 @@ class ConsensusAgent(DefaultAgent):
         valid_candidates = []
         all_responses = []
 
-        for _ in range(self.config.num_samples):
+        for i in range(self.config.num_samples):
             if self.config.step_limit * self.config.num_samples <= self.model.n_calls or self.config.cost_limit * self.config.num_samples <= self.model.cost:
                 raise LimitsExceeded()
             response = self.model.query(self.messages)
@@ -34,23 +73,34 @@ class ConsensusAgent(DefaultAgent):
             except FormatError:
                 continue
         
-        if not valid_candidates:
-            self.parse_action(all_responses[0])
-        
-        if self.config.use_embeddings and len(valid_candidates) > 1:
-            voted_response, count = self._vote_with_embeddings(valid_candidates)
-        else:
-            actions = [cand[0] for cand in valid_candidates]
-            counter = Counter(actions)
-            winner_action, count = counter.most_common(1)[0]
+        voting_manner = self.config.voting_manner
+        valid_voting = {"llm_judge", "embedding", "exact", "random"}
+        if voting_manner not in valid_voting:
+            raise ValueError(
+                f"Unknown voting_manner '{voting_manner}'. Choose from {', '.join(sorted(valid_voting))}."
+            )
 
-            voted_response = next(resp for act, resp in valid_candidates if act == winner_action)
+        if len(valid_candidates) > 1:
+            if voting_manner == "llm_judge":
+                voted_response, consensus_details = self._vote_with_llm_judge(valid_candidates)
+            elif voting_manner == "embedding":
+                voted_response, consensus_details = self._vote_with_embeddings(valid_candidates)
+            elif voting_manner == "random":
+                voted_response, consensus_details = self._vote_random(valid_candidates)
+            elif voting_manner == "exact":
+                voted_response, consensus_details = self._vote_exact(valid_candidates)
+        elif len(valid_candidates) == 1:
+            voted_response, consensus_details = valid_candidates[0][1], 1
+        else:
+            self.parse_action(all_responses[0])
 
         self.add_message(
             "assistant",
             **voted_response,
-            consensus_count=count,
-            consensus_candidates=[response["content"] for response in all_responses],
+            consensus_info={
+                "consensus_details": consensus_details,
+                "consensus_candidates": [response["content"] for response in all_responses],
+            },
         )
 
         return self.get_observation(voted_response)
@@ -109,6 +159,46 @@ class ConsensusAgent(DefaultAgent):
         voted_response = candidates[winning_index][1]
 
         return voted_response, scores.tolist()
+    
+    def _vote_with_llm_judge(self, candidates: List[tuple[str, dict]]) -> tuple[dict, int | None]:
+        formatted_actions = [
+            f"Action {idx}:\n```bash\n{action}\n```"
+            for idx, (action, _) in enumerate(candidates, start=1)
+        ]
+        
+        prompt = self.render_template(
+            self.config.llm_judge_template, actions="\n\n".join(formatted_actions)
+        )
+        judge_messages = self.messages[:-1] + [{"role": "user", "content": self.messages[-1]["content"] + prompt}]
+
+        if self.config.step_limit * self.config.num_samples <= self.model.n_calls or self.config.cost_limit * self.config.num_samples <= self.model.cost:
+            raise LimitsExceeded()
+
+        judge_response = self.model.query(judge_messages)
+
+        choice_match = re.findall(r"(?:Action\s*)?(\d+)", judge_response["content"])
+        winning_index = int(choice_match[0]) - 1 if choice_match else 0
+        if not 0 <= winning_index < len(candidates):
+            winning_index = 0
+
+        voted_response = candidates[winning_index][1]
+
+        return voted_response, {"judge_response": judge_response["content"], "winning_index": winning_index}
+    
+    def _vote_exact(self, candidates: List[tuple[str, dict]]) -> tuple[dict, int]:
+        actions = [cand[0] for cand in candidates]
+        counter = Counter(actions)
+        winner_action, count = counter.most_common(1)[0]
+
+        voted_response = next(resp for act, resp in candidates if act == winner_action)
+
+        return voted_response, count
+    
+    def _vote_random(self, candidates: List[tuple[str, dict]]) -> tuple[dict, int]:
+        winning_index = random.randint(0, len(candidates) - 1)
+        voted_response = candidates[winning_index][1]
+
+        return voted_response, winning_index
 
     def _get_embedder(self):
         if not hasattr(self, "_embedder"):

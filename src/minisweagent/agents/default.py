@@ -108,7 +108,13 @@ class DefaultAgent:
         """Parse the action from the message. Returns the action."""
         actions = re.findall(self.config.action_regex, response["content"], re.DOTALL)
         if len(actions) == 1:
-            return {"action": actions[0].strip(), **response}
+            # return {"action": actions[0].strip(), **response}
+            action = actions[0].strip()
+            filtered_action_lines = [
+                line for line in action.splitlines() if not line.lstrip().startswith("#")
+            ]
+            filtered_action = "\n".join(filtered_action_lines).strip()
+            return {"action": filtered_action, **response}
         raise FormatError(self.render_template(self.config.format_error_template, actions=actions))
 
     def execute_action(self, action: dict) -> dict:
